@@ -1,13 +1,13 @@
 #include "pid.h"
 
-void PID_Init(PID_t *pid, float kp, float ki, float kd) {
+static float PID_Abs(float value) {
+    return (value < 0.0f) ? -value : value;
+}
+
+void PID_Reset(PID_t *pid) {
     if (!pid) {
         return;
     }
-
-    pid->kp = kp;
-    pid->ki = ki;
-    pid->kd = kd;
 
     pid->p = 0.0f;
     pid->i = 0.0f;
@@ -19,6 +19,28 @@ void PID_Init(PID_t *pid, float kp, float ki, float kd) {
     pid->is_first = 1u;
 }
 
+void PID_Init(PID_t *pid, float kp, float ki, float kd) {
+    if (!pid) {
+        return;
+    }
+
+    pid->kp = kp;
+    pid->ki = ki;
+    pid->kd = kd;
+
+    pid->integral_limit = 0.0f;
+
+    PID_Reset(pid);
+}
+
+void PID_SetIntegralLimit(PID_t *pid, float limit) {
+    if (!pid) {
+        return;
+    }
+
+    pid->integral_limit = PID_Abs(limit);
+}
+
 float PID_Update(PID_t *pid, float error, float dt) {
     if (!pid || dt <= 0.0f) {
         return 0.0f;
@@ -28,6 +50,14 @@ float PID_Update(PID_t *pid, float error, float dt) {
 
     pid->p = pid->error;
     pid->i += pid->error * dt;
+
+    if (pid->integral_limit > 0.0f) {
+        if (pid->i > pid->integral_limit) {
+            pid->i = pid->integral_limit;
+        } else if (pid->i < -pid->integral_limit) {
+            pid->i = -pid->integral_limit;
+        }
+    }
 
     if (pid->is_first) {
         pid->d = 0.0f;

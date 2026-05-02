@@ -6,7 +6,7 @@
 #include "main.h"
 #include "pid.h"
 
-#define STATUS_WHEEL_COUNT 4U
+#define STATUS_WHEEL_COUNT 2U
 #define STATUS_SERVO_COUNT 2U
 
 typedef struct {
@@ -19,6 +19,8 @@ typedef struct {
 typedef struct {
     float current_angle;
     float target_angle;
+    uint16_t current_pulse;
+    uint16_t target_pulse;
 } Servo_t;
 
 typedef struct {
@@ -42,6 +44,7 @@ typedef struct {
 
 typedef struct {
     Gyro_t gyro;
+    float vision_target;
 } Sensor_t;
 
 typedef struct {
@@ -51,12 +54,14 @@ typedef struct {
 typedef struct {
     int32_t main_mode;
     int32_t sub_mode;
+    int32_t car_run_state;
 } State_t;
 
 typedef struct {
     float demo_setpoint;
     float measurement;
     float control_out;
+    int64_t total_pulses;
     uint32_t last_tick;
     uint32_t last_log_tick;
     uint32_t last_hello_tick;
