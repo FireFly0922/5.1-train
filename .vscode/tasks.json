@@ -1,0 +1,45 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Debug",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/build/Debug"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Flash and Run (OpenOCD)",
+            "type": "shell",
+            "command": "D:/xpack-openocd-0.12.0-7/bin/openocd.exe",
+            "args": [
+                "-f",
+                "D:/xpack-openocd-0.12.0-7/openocd/scripts/interface/stlink.cfg",
+                "-f",
+                "D:/xpack-openocd-0.12.0-7/openocd/scripts/target/stm32h7x.cfg",
+                "-c",
+                "program {${workspaceFolder}/build/Debug/main.elf} verify reset exit"
+            ],
+            "dependsOn": "Build Debug",
+            "problemMatcher": []
+        },
+        {
+            "label": "Reset and Run (OpenOCD)",
+            "type": "shell",
+            "command": "D:/xpack-openocd-0.12.0-7/bin/openocd.exe",
+            "args": [
+                "-f",
+                "D:/xpack-openocd-0.12.0-7/openocd/scripts/interface/stlink.cfg",
+                "-f",
+                "D:/xpack-openocd-0.12.0-7/openocd/scripts/target/stm32h7x.cfg",
+                "-c",
+                "init; reset run; exit"
+            ],
+            "problemMatcher": []
+        }
+    ]
+}
