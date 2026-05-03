@@ -20,7 +20,7 @@
 
 #define APP_MOTOR_LEFT_SIGN                 -1       /* 左电机方向符号，调整正反转。 */
 #define APP_MOTOR_RIGHT_SIGN                1       /* 右电机方向符号，调整正反转。 */
-#define APP_MOTOR_LEFT_PWM_TRIM_X1000       1000U     /* Left PWM trim, 1000 means no scaling. */
+#define APP_MOTOR_LEFT_PWM_TRIM_X1000       930U     /* Left PWM trim, 1000 means no scaling. */
 #define APP_MOTOR_RIGHT_PWM_TRIM_X1000      1000U    /* Right PWM trim, 1000 means no scaling. */
 #define APP_ENCODER_LEFT_SIGN               1        /* 左编码器计数方向符号。 */
 #define APP_ENCODER_RIGHT_SIGN              -1       /* 右编码器计数方向符号。 */
@@ -60,7 +60,7 @@
 #define APP_TURN_LOCK_THRESHOLD_DEG         3.0f     /* 转向锁定判定误差阈值，单位：度。 */
 
 #define APP_GW_CALIBRATION_BLACK            15000U   /* 灰度传感器黑线校准值。 */
-#define APP_GW_CALIBRATION_WHITE            49000U   /* 灰度传感器白底校准值。 */
+#define APP_GW_CALIBRATION_WHITE            36000U   /* 灰度传感器白底校准值。 */
 #define APP_GW_BASE_SPEED                   APP_BASE_SPEED_SLOW /* 灰度循迹基础速度。 */
 #define APP_GW_LOW_THRESHOLD                25U      /* 灰度归一化低阈值，用于判断是否压线。 */
 #define APP_GW_LINE_KP                      0.8f     /* 灰度循迹 PID 比例系数。 */
@@ -70,9 +70,9 @@
 #define APP_GW_STEER_SIGN                   1.0f     /* 灰度循迹转向方向符号。 */
 #define APP_GW_STOP_ON_CROSS                0U       /* Set to 1 to stop on cross/full-line detection. */
 #define APP_GW_OPEN_PWM                     5500     /* Open-loop PWM used by 8-bit gray-sensor line following. */
-#define APP_GW_OPEN_TURN_PWM                1200      /*PW PWM reduction applied to the inner wheel on normal side trigger. */
+#define APP_GW_OPEN_TURN_PWM                1600      /*PW PWM reduction applied to the inner wheel on normal side trigger. */
 #define APP_GW_OPEN_SHARP_TURN_PWM          1000     /* M reduction applied when the outermost sensor is triggered. */
-#define APP_GW_MIN_FORWARD_PWM              3600     /* Minimum forward PWM kept during gray-sensor steering. */
+#define APP_GW_MIN_FORWARD_PWM              3800     /* Minimum forward PWM kept during gray-sensor steering. */
 
 #define APP_TURN_MAX_ROTATE                 10.0f     /* 转向时最大旋转速度。 */
 #define APP_TURN_MAX_DRIVE                  18.0f    /* 转向时最大驱动速度。 */
