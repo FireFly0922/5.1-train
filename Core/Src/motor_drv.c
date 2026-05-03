@@ -45,6 +45,10 @@ static int32_t Motor_ClampPwm(int32_t pwm_val) {
     return pwm_val;
 }
 
+static int32_t Motor_ApplySign(int32_t value, int32_t sign) {
+    return (sign < 0) ? -value : value;
+}
+
 void Motor_Init(void) {
     uint32_t index;
 
@@ -73,10 +77,10 @@ void Motor_SetSpeed(uint8_t motor_id, int32_t pwm_val) {
         return;
     }
 
-    pwm_val = Motor_ClampPwm(pwm_val);
-    STATUS.motor.wheel[index].pwm_duty = pwm_val;
-
     if (index == MOTOR_LEFT_INDEX) {
+        pwm_val = Motor_ClampPwm(Motor_ApplySign(pwm_val, APP_MOTOR_LEFT_SIGN));
+        STATUS.motor.wheel[index].pwm_duty = pwm_val;
+
         if (pwm_val >= 0) {
             __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)pwm_val);
             __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0U);
@@ -85,7 +89,9 @@ void Motor_SetSpeed(uint8_t motor_id, int32_t pwm_val) {
             __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, (uint32_t)(-pwm_val));
         }
     } else if (index == MOTOR_RIGHT_INDEX) {
-        pwm_val = -pwm_val;
+        pwm_val = Motor_ClampPwm(Motor_ApplySign(pwm_val, APP_MOTOR_RIGHT_SIGN));
+        STATUS.motor.wheel[index].pwm_duty = pwm_val;
+
         if (pwm_val >= 0) {
             __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, (uint32_t)pwm_val);
             __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0U);
@@ -107,9 +113,11 @@ int32_t Motor_ReadSpeed(uint8_t motor_id) {
     if (index == MOTOR_LEFT_INDEX) {
         speed = (int16_t)__HAL_TIM_GET_COUNTER(&htim2);
         __HAL_TIM_SET_COUNTER(&htim2, 0U);
+        speed = Motor_ApplySign(speed, APP_ENCODER_LEFT_SIGN);
     } else {
-        speed = -(int16_t)__HAL_TIM_GET_COUNTER(&htim4);
+        speed = (int16_t)__HAL_TIM_GET_COUNTER(&htim4);
         __HAL_TIM_SET_COUNTER(&htim4, 0U);
+        speed = Motor_ApplySign(speed, APP_ENCODER_RIGHT_SIGN);
     }
 
     STATUS.motor.wheel[index].current_speed = (float)speed;

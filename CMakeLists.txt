@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/wheel.c
     Core/Src/pid.c
     Core/Src/motor_drv.c
+    Core/Src/GW.c
     Core/Src/status.c
     Core/Src/log.c
 )
