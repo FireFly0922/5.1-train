@@ -49,6 +49,73 @@ static int32_t Motor_ApplySign(int32_t value, int32_t sign) {
     return (sign < 0) ? -value : value;
 }
 
+static uint32_t Motor_OutputFromIndex(uint32_t index) {
+    if (index == MOTOR_LEFT_INDEX) {
+        return APP_MOTOR_LEFT_OUTPUT;
+    }
+
+    return APP_MOTOR_RIGHT_OUTPUT;
+}
+
+static int32_t Motor_SignFromIndex(uint32_t index) {
+    if (index == MOTOR_LEFT_INDEX) {
+        return APP_MOTOR_LEFT_SIGN;
+    }
+
+    return APP_MOTOR_RIGHT_SIGN;
+}
+
+static uint32_t Motor_EncoderFromIndex(uint32_t index) {
+    if (index == MOTOR_LEFT_INDEX) {
+        return APP_ENCODER_LEFT_TIMER;
+    }
+
+    return APP_ENCODER_RIGHT_TIMER;
+}
+
+static int32_t Motor_EncoderSignFromIndex(uint32_t index) {
+    if (index == MOTOR_LEFT_INDEX) {
+        return APP_ENCODER_LEFT_SIGN;
+    }
+
+    return APP_ENCODER_RIGHT_SIGN;
+}
+
+static void Motor_WriteOutput(uint32_t output, int32_t pwm_val) {
+    uint32_t forward_channel;
+    uint32_t reverse_channel;
+
+    if (output == APP_MOTOR_OUTPUT_TIM3_CH34) {
+        forward_channel = TIM_CHANNEL_3;
+        reverse_channel = TIM_CHANNEL_4;
+    } else {
+        forward_channel = TIM_CHANNEL_1;
+        reverse_channel = TIM_CHANNEL_2;
+    }
+
+    if (pwm_val >= 0) {
+        __HAL_TIM_SET_COMPARE(&htim3, forward_channel, (uint32_t)pwm_val);
+        __HAL_TIM_SET_COMPARE(&htim3, reverse_channel, 0U);
+    } else {
+        __HAL_TIM_SET_COMPARE(&htim3, forward_channel, 0U);
+        __HAL_TIM_SET_COMPARE(&htim3, reverse_channel, (uint32_t)(-pwm_val));
+    }
+}
+
+static int32_t Motor_ReadEncoder(uint32_t encoder_timer) {
+    int32_t speed;
+
+    if (encoder_timer == APP_ENCODER_TIMER_TIM4) {
+        speed = (int16_t)__HAL_TIM_GET_COUNTER(&htim4);
+        __HAL_TIM_SET_COUNTER(&htim4, 0U);
+    } else {
+        speed = (int16_t)__HAL_TIM_GET_COUNTER(&htim2);
+        __HAL_TIM_SET_COUNTER(&htim2, 0U);
+    }
+
+    return speed;
+}
+
 void Motor_Init(void) {
     uint32_t index;
 
@@ -72,53 +139,30 @@ void Motor_Init(void) {
 
 void Motor_SetSpeed(uint8_t motor_id, int32_t pwm_val) {
     uint32_t index = Motor_IndexFromId(motor_id);
+    uint32_t output;
 
     if (index >= STATUS_WHEEL_COUNT) {
         return;
     }
 
-    if (index == MOTOR_LEFT_INDEX) {
-        pwm_val = Motor_ClampPwm(Motor_ApplySign(pwm_val, APP_MOTOR_LEFT_SIGN));
-        STATUS.motor.wheel[index].pwm_duty = pwm_val;
-
-        if (pwm_val >= 0) {
-            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (uint32_t)pwm_val);
-            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0U);
-        } else {
-            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0U);
-            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, (uint32_t)(-pwm_val));
-        }
-    } else if (index == MOTOR_RIGHT_INDEX) {
-        pwm_val = Motor_ClampPwm(Motor_ApplySign(pwm_val, APP_MOTOR_RIGHT_SIGN));
-        STATUS.motor.wheel[index].pwm_duty = pwm_val;
-
-        if (pwm_val >= 0) {
-            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, (uint32_t)pwm_val);
-            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0U);
-        } else {
-            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 0U);
-            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, (uint32_t)(-pwm_val));
-        }
-    }
+    output = Motor_OutputFromIndex(index);
+    pwm_val = Motor_ClampPwm(Motor_ApplySign(pwm_val, Motor_SignFromIndex(index)));
+    STATUS.motor.wheel[index].pwm_duty = pwm_val;
+    Motor_WriteOutput(output, pwm_val);
 }
 
 int32_t Motor_ReadSpeed(uint8_t motor_id) {
     uint32_t index = Motor_IndexFromId(motor_id);
+    uint32_t encoder_timer;
     int32_t speed;
 
     if (index >= STATUS_WHEEL_COUNT) {
         return 0;
     }
 
-    if (index == MOTOR_LEFT_INDEX) {
-        speed = (int16_t)__HAL_TIM_GET_COUNTER(&htim2);
-        __HAL_TIM_SET_COUNTER(&htim2, 0U);
-        speed = Motor_ApplySign(speed, APP_ENCODER_LEFT_SIGN);
-    } else {
-        speed = (int16_t)__HAL_TIM_GET_COUNTER(&htim4);
-        __HAL_TIM_SET_COUNTER(&htim4, 0U);
-        speed = Motor_ApplySign(speed, APP_ENCODER_RIGHT_SIGN);
-    }
+    encoder_timer = Motor_EncoderFromIndex(index);
+    speed = Motor_ReadEncoder(encoder_timer);
+    speed = Motor_ApplySign(speed, Motor_EncoderSignFromIndex(index));
 
     STATUS.motor.wheel[index].current_speed = (float)speed;
 

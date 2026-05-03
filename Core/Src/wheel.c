@@ -1,5 +1,6 @@
 #include "wheel.h"
 
+#include <stdint.h>
 #include <string.h>
 
 #include "adc.h"
@@ -20,16 +21,42 @@ static void Wheel_InitMotor(void);
 static void Wheel_InitGw(void);
 static void Wheel_InitState(void);
 static void Wheel_InitRuntime(uint32_t now_tick);
+static void Wheel_UpdateMotorTest(uint32_t now_tick);
 static void Wheel_UpdatePID(uint32_t now_tick, float dt);
 static void Wheel_UpdateGwTargets(Wheel_t *left_wheel, Wheel_t *right_wheel, float dt);
 static float Wheel_UpdateLegacyPid(PID_t *pid, float target, float current, float dt);
 static float Wheel_Clamp(float value, float min_value, float max_value);
 static void Wheel_CopyGwStatus(GW_Status status);
 static void Wheel_PrintGwSamples(void);
+static int32_t Wheel_FloatToScaled(float value, float scale);
 
 static GW_Sensor g_gw_sensor;
 static PID_t g_gw_line_pid;
 static uint32_t g_motor_arm_tick;
+
+#if APP_WHEEL_TEST_ENABLE
+typedef struct {
+    const char *name;
+    int32_t left_pwm;
+    int32_t right_pwm;
+    uint32_t duration_ms;
+} Wheel_TestStep;
+
+static const Wheel_TestStep g_wheel_test_steps[] = {
+    {"left forward", APP_WHEEL_TEST_PWM, 0, APP_WHEEL_TEST_RUN_MS},
+    {"stop", 0, 0, APP_WHEEL_TEST_STOP_MS},
+    {"left reverse", -APP_WHEEL_TEST_PWM, 0, APP_WHEEL_TEST_RUN_MS},
+    {"stop", 0, 0, APP_WHEEL_TEST_STOP_MS},
+    {"right forward", 0, APP_WHEEL_TEST_PWM, APP_WHEEL_TEST_RUN_MS},
+    {"stop", 0, 0, APP_WHEEL_TEST_STOP_MS},
+    {"right reverse", 0, -APP_WHEEL_TEST_PWM, APP_WHEEL_TEST_RUN_MS},
+    {"stop", 0, 0, APP_WHEEL_TEST_STOP_MS},
+};
+
+static uint32_t g_wheel_test_start_tick;
+static uint32_t g_wheel_test_last_step;
+static uint32_t g_wheel_test_last_log_tick;
+#endif
 
 void Wheel_Init(void) {
     Wheel_t *left_wheel = &STATUS.motor.wheel[WHEEL_LEFT_INDEX];
@@ -40,6 +67,19 @@ void Wheel_Init(void) {
     Wheel_InitMotor();
     Wheel_InitState();
     Wheel_InitRuntime(HAL_GetTick());
+
+#if APP_WHEEL_TEST_ENABLE
+    g_wheel_test_start_tick = HAL_GetTick();
+    g_wheel_test_last_step = UINT32_MAX;
+    g_wheel_test_last_log_tick = 0U;
+    PRINTLN("wheel test enabled: pwm=%d run=%lu stop=%lu",
+            APP_WHEEL_TEST_PWM,
+            (unsigned long)APP_WHEEL_TEST_RUN_MS,
+            (unsigned long)APP_WHEEL_TEST_STOP_MS);
+    PRINTLN("sequence: left forward, left reverse, right forward, right reverse");
+    return;
+#endif
+
     Wheel_InitGw();
 
     STATUS.runtime.demo_setpoint = APP_GW_BASE_SPEED;
@@ -62,28 +102,38 @@ void Wheel_Init(void) {
             APP_MAX_PWM,
             APP_PWM_DEADBAND,
             APP_PWM_FEEDFORWARD);
-    PRINTLN("motor: arm=%lu left_sign=%d right_sign=%d enc_left=%d enc_right=%d",
+    PRINTLN("mapping: motor_out L=%u R=%u enc_timer L=%u R=%u",
+            (unsigned int)APP_MOTOR_LEFT_OUTPUT,
+            (unsigned int)APP_MOTOR_RIGHT_OUTPUT,
+            (unsigned int)APP_ENCODER_LEFT_TIMER,
+            (unsigned int)APP_ENCODER_RIGHT_TIMER);
+    PRINTLN("drive: mode=%u straight_speed_x100=%ld",
+            (unsigned int)APP_DRIVE_MODE,
+            (long)Wheel_FloatToScaled(APP_STRAIGHT_TEST_SPEED, 100.0f));
+    PRINTLN("drive: straight_pwm=%d",
+            APP_STRAIGHT_TEST_PWM);
+    PRINTLN("motor: arm=%lu motor_sign L=%d R=%d enc_sign L=%d R=%d",
             (unsigned long)APP_MOTOR_ARM_DELAY_MS,
             APP_MOTOR_LEFT_SIGN,
             APP_MOTOR_RIGHT_SIGN,
             APP_ENCODER_LEFT_SIGN,
             APP_ENCODER_RIGHT_SIGN);
-    PRINTLN("GW: base=%.2f kp=%.2f max_corr=%.2f steer=%.1f low=%u black=%u white=%u",
-            APP_GW_BASE_SPEED,
-            APP_GW_LINE_KP,
-            APP_GW_MAX_CORRECTION,
-            APP_GW_STEER_SIGN,
+    PRINTLN("GW: base_x100=%ld kp_x100=%ld max_corr_x100=%ld steer_x10=%ld low=%u black=%u white=%u",
+            (long)Wheel_FloatToScaled(APP_GW_BASE_SPEED, 100.0f),
+            (long)Wheel_FloatToScaled(APP_GW_LINE_KP, 100.0f),
+            (long)Wheel_FloatToScaled(APP_GW_MAX_CORRECTION, 100.0f),
+            (long)Wheel_FloatToScaled(APP_GW_STEER_SIGN, 10.0f),
             APP_GW_LOW_THRESHOLD,
             APP_GW_CALIBRATION_BLACK,
             APP_GW_CALIBRATION_WHITE);
-    PRINTLN("wheel PID: left %.2f/%.2f/%.2f right %.2f/%.2f/%.2f speed=%.2f",
-            left_wheel->pid.kp,
-            left_wheel->pid.ki,
-            left_wheel->pid.kd,
-            right_wheel->pid.kp,
-            right_wheel->pid.ki,
-            right_wheel->pid.kd,
-            left_wheel->target_speed);
+    PRINTLN("wheel PID x100: left %ld/%ld/%ld right %ld/%ld/%ld speed=%ld",
+            (long)Wheel_FloatToScaled(left_wheel->pid.kp, 100.0f),
+            (long)Wheel_FloatToScaled(left_wheel->pid.ki, 100.0f),
+            (long)Wheel_FloatToScaled(left_wheel->pid.kd, 100.0f),
+            (long)Wheel_FloatToScaled(right_wheel->pid.kp, 100.0f),
+            (long)Wheel_FloatToScaled(right_wheel->pid.ki, 100.0f),
+            (long)Wheel_FloatToScaled(right_wheel->pid.kd, 100.0f),
+            (long)Wheel_FloatToScaled(left_wheel->target_speed, 100.0f));
 }
 
 void Wheel_Update(void) {
@@ -95,6 +145,12 @@ void Wheel_Update(void) {
     }
 
     STATUS.runtime.last_tick = now_tick;
+
+#if APP_WHEEL_TEST_ENABLE
+    Wheel_UpdateMotorTest(now_tick);
+    HAL_Delay(APP_MAIN_LOOP_DELAY_MS);
+    return;
+#endif
 
     Wheel_UpdatePID(now_tick, dt);
 
@@ -170,6 +226,65 @@ static void Wheel_InitRuntime(uint32_t now_tick) {
     g_motor_arm_tick = now_tick;
 }
 
+static void Wheel_UpdateMotorTest(uint32_t now_tick) {
+#if APP_WHEEL_TEST_ENABLE
+    const uint32_t step_count = (uint32_t)(sizeof(g_wheel_test_steps) / sizeof(g_wheel_test_steps[0]));
+    uint32_t elapsed = now_tick - g_wheel_test_start_tick;
+    uint32_t cycle_ms = 0U;
+    uint32_t step_index = 0U;
+    uint32_t step_elapsed;
+    uint32_t index;
+    const Wheel_TestStep *step;
+    int32_t speed_left;
+    int32_t speed_right;
+
+    for (index = 0U; index < step_count; ++index) {
+        cycle_ms += g_wheel_test_steps[index].duration_ms;
+    }
+
+    if (cycle_ms == 0U) {
+        Motor_SetSpeed(WHEEL_LEFT_ID, 0);
+        Motor_SetSpeed(WHEEL_RIGHT_ID, 0);
+        return;
+    }
+
+    elapsed %= cycle_ms;
+    step_elapsed = elapsed;
+
+    for (index = 0U; index < step_count; ++index) {
+        if (step_elapsed < g_wheel_test_steps[index].duration_ms) {
+            step_index = index;
+            break;
+        }
+
+        step_elapsed -= g_wheel_test_steps[index].duration_ms;
+    }
+
+    step = &g_wheel_test_steps[step_index];
+    Motor_SetSpeed(WHEEL_LEFT_ID, step->left_pwm);
+    Motor_SetSpeed(WHEEL_RIGHT_ID, step->right_pwm);
+
+    speed_left = Motor_ReadSpeed(WHEEL_LEFT_ID);
+    speed_right = Motor_ReadSpeed(WHEEL_RIGHT_ID);
+
+    if ((step_index != g_wheel_test_last_step) ||
+        ((now_tick - g_wheel_test_last_log_tick) >= APP_LOG_PERIOD_MS)) {
+        PRINTLN("wheel test: %s | cmd L=%ld R=%ld | actual_pwm L=%ld R=%ld | enc L=%ld R=%ld",
+                step->name,
+                (long)step->left_pwm,
+                (long)step->right_pwm,
+                (long)STATUS.motor.wheel[WHEEL_LEFT_INDEX].pwm_duty,
+                (long)STATUS.motor.wheel[WHEEL_RIGHT_INDEX].pwm_duty,
+                (long)speed_left,
+                (long)speed_right);
+        g_wheel_test_last_step = step_index;
+        g_wheel_test_last_log_tick = now_tick;
+    }
+#else
+    (void)now_tick;
+#endif
+}
+
 // Drive both wheels with the same speed loop parameters used by legacy.
 static void Wheel_UpdatePID(uint32_t now_tick, float dt) {
     Wheel_t *left_wheel = &STATUS.motor.wheel[WHEEL_LEFT_INDEX];
@@ -179,8 +294,6 @@ static void Wheel_UpdatePID(uint32_t now_tick, float dt) {
     int32_t speed_left;
     int32_t speed_right;
     uint8_t motor_armed;
-
-    Wheel_UpdateGwTargets(left_wheel, right_wheel, dt);
 
     speed_left = Motor_ReadSpeed(WHEEL_LEFT_ID);
     speed_right = Motor_ReadSpeed(WHEEL_RIGHT_ID);
@@ -197,6 +310,17 @@ static void Wheel_UpdatePID(uint32_t now_tick, float dt) {
         PID_Reset(&right_wheel->pid);
         PID_Reset(&g_gw_line_pid);
     } else {
+#if APP_DRIVE_MODE == APP_DRIVE_MODE_STRAIGHT_OPEN_PWM
+        left_wheel->target_speed = 0.0f;
+        right_wheel->target_speed = 0.0f;
+        left_pwm = (float)APP_STRAIGHT_TEST_PWM;
+        right_pwm = (float)APP_STRAIGHT_TEST_PWM;
+        PID_Reset(&left_wheel->pid);
+        PID_Reset(&right_wheel->pid);
+        PID_Reset(&g_gw_line_pid);
+#elif APP_DRIVE_MODE == APP_DRIVE_MODE_STRAIGHT_PID
+        left_wheel->target_speed = APP_STRAIGHT_TEST_SPEED;
+        right_wheel->target_speed = APP_STRAIGHT_TEST_SPEED;
         left_pwm = Wheel_UpdateLegacyPid(&left_wheel->pid,
                                          left_wheel->target_speed,
                                          (float)speed_left,
@@ -205,6 +329,17 @@ static void Wheel_UpdatePID(uint32_t now_tick, float dt) {
                                           right_wheel->target_speed,
                                           (float)speed_right,
                                           dt);
+#else
+        Wheel_UpdateGwTargets(left_wheel, right_wheel, dt);
+        left_pwm = Wheel_UpdateLegacyPid(&left_wheel->pid,
+                                         left_wheel->target_speed,
+                                         (float)speed_left,
+                                         dt);
+        right_pwm = Wheel_UpdateLegacyPid(&right_wheel->pid,
+                                          right_wheel->target_speed,
+                                          (float)speed_right,
+                                          dt);
+#endif
     }
 
     Motor_SetSpeed(WHEEL_LEFT_ID, (int32_t)left_pwm);
@@ -215,20 +350,21 @@ static void Wheel_UpdatePID(uint32_t now_tick, float dt) {
     STATUS.runtime.control_out = (left_pwm + right_pwm) * 0.5f;
 
     if ((now_tick - STATUS.runtime.last_log_tick) >= APP_LOG_PERIOD_MS) {
-        PRINTLN("GW bits=0x%02X pos=%.2f lost=%u cross=%u st=%ld armed=%u | L sp=%.2f speed=%ld pwm=%ld | R sp=%.2f speed=%ld pwm=%ld dt=%.3f",
+        PRINTLN("GW bits=0x%02X pos_x100=%ld corr_x100=%ld lost=%u cross=%u st=%ld armed=%u | L sp_x100=%ld speed=%ld pwm=%ld | R sp_x100=%ld speed=%ld pwm=%ld dt_x1000=%ld",
                 STATUS.sensor.gw.line_bits,
-                STATUS.sensor.gw.line_position,
+                (long)Wheel_FloatToScaled(STATUS.sensor.gw.line_position, 100.0f),
+                (long)Wheel_FloatToScaled((left_wheel->target_speed - right_wheel->target_speed) * 0.5f, 100.0f),
                 STATUS.sensor.gw.lost,
                 STATUS.sensor.gw.cross,
                 (long)STATUS.sensor.gw.last_status,
                 motor_armed,
-                left_wheel->target_speed,
+                (long)Wheel_FloatToScaled(left_wheel->target_speed, 100.0f),
                 (long)speed_left,
                 (long)left_wheel->pwm_duty,
-                right_wheel->target_speed,
+                (long)Wheel_FloatToScaled(right_wheel->target_speed, 100.0f),
                 (long)speed_right,
                 (long)right_wheel->pwm_duty,
-                dt);
+                (long)Wheel_FloatToScaled(dt, 1000.0f));
         Wheel_PrintGwSamples();
         STATUS.runtime.last_log_tick = now_tick;
     }
@@ -256,8 +392,8 @@ static void Wheel_UpdateGwTargets(Wheel_t *left_wheel, Wheel_t *right_wheel, flo
     }
 
     if (GW_IsCross(&g_gw_sensor) != 0u) {
-        left_wheel->target_speed = APP_GW_BASE_SPEED;
-        right_wheel->target_speed = APP_GW_BASE_SPEED;
+        left_wheel->target_speed = 0.0f;
+        right_wheel->target_speed = 0.0f;
         PID_Reset(&g_gw_line_pid);
         return;
     }
@@ -291,6 +427,18 @@ static float Wheel_Clamp(float value, float min_value, float max_value) {
     }
 
     return value;
+}
+
+static int32_t Wheel_FloatToScaled(float value, float scale) {
+    float scaled = value * scale;
+
+    if (scaled >= 0.0f) {
+        scaled += 0.5f;
+    } else {
+        scaled -= 0.5f;
+    }
+
+    return (int32_t)scaled;
 }
 
 static void Wheel_CopyGwStatus(GW_Status status) {
