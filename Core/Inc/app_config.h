@@ -3,10 +3,10 @@
 
 #define APP_RX_BUF_SIZE                     64U      /* 串口接收缓冲区大小，单位：字节。 */
 
-/* 调试/整定默认值：TIM3 周期为 9999，3500 约等于 35% 占空比。 */
+/* 调试/整定默认值：TIM3 周期为 9999，7000 约等于 70% 占空比。 */
 #define APP_MAX_PWM                         7000     /* 电机 PWM 最大输出限幅。 */
 #define APP_PWM_DEADBAND                    5        /* PWM 死区，小于该值时按 0 处理。 */
-#define APP_PWM_FEEDFORWARD                 2500     /* 电机启动前馈 PWM，用于克服静摩擦。 */
+#define APP_PWM_FEEDFORWARD                 4000     /* 电机启动前馈 PWM，用于克服静摩擦。 */
 
 #define APP_MOTOR_OUTPUT_TIM3_CH12          0U       /* TIM3 CH1/CH2 motor driver input pair. */
 #define APP_MOTOR_OUTPUT_TIM3_CH34          1U       /* TIM3 CH3/CH4 motor driver input pair. */
@@ -15,11 +15,13 @@
 
 #define APP_MOTOR_LEFT_OUTPUT               APP_MOTOR_OUTPUT_TIM3_CH12
 #define APP_MOTOR_RIGHT_OUTPUT              APP_MOTOR_OUTPUT_TIM3_CH34
-#define APP_ENCODER_LEFT_TIMER              APP_ENCODER_TIMER_TIM2
-#define APP_ENCODER_RIGHT_TIMER             APP_ENCODER_TIMER_TIM4
+#define APP_ENCODER_LEFT_TIMER              APP_ENCODER_TIMER_TIM4
+#define APP_ENCODER_RIGHT_TIMER             APP_ENCODER_TIMER_TIM2
 
 #define APP_MOTOR_LEFT_SIGN                 -1       /* 左电机方向符号，调整正反转。 */
 #define APP_MOTOR_RIGHT_SIGN                1       /* 右电机方向符号，调整正反转。 */
+#define APP_MOTOR_LEFT_PWM_TRIM_X1000       1000U     /* Left PWM trim, 1000 means no scaling. */
+#define APP_MOTOR_RIGHT_PWM_TRIM_X1000      1000U    /* Right PWM trim, 1000 means no scaling. */
 #define APP_ENCODER_LEFT_SIGN               1        /* 左编码器计数方向符号。 */
 #define APP_ENCODER_RIGHT_SIGN              -1       /* 右编码器计数方向符号。 */
 
@@ -53,28 +55,33 @@
 #define APP_STRAIGHT_TEST_PWM               3500
 
 #define APP_BASE_SPEED_FAST                 25.0f     /* 快速直行基础速度。 */
-#define APP_BASE_SPEED_SLOW                 8.0f     /* 慢速直行基础速度。 */
+#define APP_BASE_SPEED_SLOW                 10.0f     /* 慢速直行基础速度。 */
 #define APP_TURN_ANGLE_DEG                  90.0f    /* 默认转向角度，单位：度。 */
 #define APP_TURN_LOCK_THRESHOLD_DEG         3.0f     /* 转向锁定判定误差阈值，单位：度。 */
 
-#define APP_GW_CALIBRATION_BLACK            12700U   /* 灰度传感器黑线校准值。 */
-#define APP_GW_CALIBRATION_WHITE            45900U   /* 灰度传感器白底校准值。 */
+#define APP_GW_CALIBRATION_BLACK            15000U   /* 灰度传感器黑线校准值。 */
+#define APP_GW_CALIBRATION_WHITE            49000U   /* 灰度传感器白底校准值。 */
 #define APP_GW_BASE_SPEED                   APP_BASE_SPEED_SLOW /* 灰度循迹基础速度。 */
-#define APP_GW_LOW_THRESHOLD                15U      /* 灰度归一化低阈值，用于判断是否压线。 */
+#define APP_GW_LOW_THRESHOLD                25U      /* 灰度归一化低阈值，用于判断是否压线。 */
 #define APP_GW_LINE_KP                      0.8f     /* 灰度循迹 PID 比例系数。 */
 #define APP_GW_LINE_KI                      0.0f     /* 灰度循迹 PID 积分系数。 */
 #define APP_GW_LINE_KD                      0.0f     /* 灰度循迹 PID 微分系数。 */
 #define APP_GW_MAX_CORRECTION               4.0f     /* 灰度循迹最大速度修正量。 */
 #define APP_GW_STEER_SIGN                   1.0f     /* 灰度循迹转向方向符号。 */
+#define APP_GW_STOP_ON_CROSS                0U       /* Set to 1 to stop on cross/full-line detection. */
+#define APP_GW_OPEN_PWM                     5500     /* Open-loop PWM used by 8-bit gray-sensor line following. */
+#define APP_GW_OPEN_TURN_PWM                1200      /*PW PWM reduction applied to the inner wheel on normal side trigger. */
+#define APP_GW_OPEN_SHARP_TURN_PWM          1000     /* M reduction applied when the outermost sensor is triggered. */
+#define APP_GW_MIN_FORWARD_PWM              3600     /* Minimum forward PWM kept during gray-sensor steering. */
 
-#define APP_TURN_MAX_ROTATE                 8.0f     /* 转向时最大旋转速度。 */
-#define APP_TURN_MAX_DRIVE                  15.0f    /* 转向时最大驱动速度。 */
+#define APP_TURN_MAX_ROTATE                 10.0f     /* 转向时最大旋转速度。 */
+#define APP_TURN_MAX_DRIVE                  18.0f    /* 转向时最大驱动速度。 */
 
-#define APP_PID_LEFT_KP                     45.0f    /* 左轮速度 PID 比例系数。 */
+#define APP_PID_LEFT_KP                     100.0f    /* 左轮速度 PID 比例系数。 */
 #define APP_PID_LEFT_KI                     0.0f     /* 左轮速度 PID 积分系数。 */
 #define APP_PID_LEFT_KD                     0.0f     /* 左轮速度 PID 微分系数。 */
 
-#define APP_PID_RIGHT_KP                    45.0f    /* 右轮速度 PID 比例系数。 */
+#define APP_PID_RIGHT_KP                    100.0f    /* 右轮速度 PID 比例系数。 */
 #define APP_PID_RIGHT_KI                    0.0f     /* 右轮速度 PID 积分系数。 */
 #define APP_PID_RIGHT_KD                    0.0f     /* 右轮速度 PID 微分系数。 */
 

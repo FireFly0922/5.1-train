@@ -65,6 +65,27 @@ static int32_t Motor_SignFromIndex(uint32_t index) {
     return APP_MOTOR_RIGHT_SIGN;
 }
 
+static uint32_t Motor_PwmTrimFromIndex(uint32_t index) {
+    if (index == MOTOR_LEFT_INDEX) {
+        return APP_MOTOR_LEFT_PWM_TRIM_X1000;
+    }
+
+    return APP_MOTOR_RIGHT_PWM_TRIM_X1000;
+}
+
+static int32_t Motor_ApplyPwmTrim(int32_t value, uint32_t trim_x1000) {
+    int32_t sign = 1;
+    int32_t scaled;
+
+    if (value < 0) {
+        sign = -1;
+        value = -value;
+    }
+
+    scaled = (int32_t)(((int64_t)value * (int64_t)trim_x1000 + 500LL) / 1000LL);
+    return sign * scaled;
+}
+
 static uint32_t Motor_EncoderFromIndex(uint32_t index) {
     if (index == MOTOR_LEFT_INDEX) {
         return APP_ENCODER_LEFT_TIMER;
@@ -138,17 +159,32 @@ void Motor_Init(void) {
 }
 
 void Motor_SetSpeed(uint8_t motor_id, int32_t pwm_val) {
+    int32_t logical_pwm;
+
+    logical_pwm = Motor_ClampPwm(pwm_val);
+    Motor_SetRawPwm(motor_id, logical_pwm);
+}
+
+void Motor_SetRawPwm(uint8_t motor_id, int32_t pwm_val) {
     uint32_t index = Motor_IndexFromId(motor_id);
     uint32_t output;
+    int32_t hardware_pwm;
 
     if (index >= STATUS_WHEEL_COUNT) {
         return;
     }
 
     output = Motor_OutputFromIndex(index);
-    pwm_val = Motor_ClampPwm(Motor_ApplySign(pwm_val, Motor_SignFromIndex(index)));
+    pwm_val = Motor_ApplyPwmTrim(pwm_val, Motor_PwmTrimFromIndex(index));
+    if (pwm_val > APP_MAX_PWM) {
+        pwm_val = APP_MAX_PWM;
+    } else if (pwm_val < -APP_MAX_PWM) {
+        pwm_val = -APP_MAX_PWM;
+    }
+
+    hardware_pwm = Motor_ApplySign(pwm_val, Motor_SignFromIndex(index));
     STATUS.motor.wheel[index].pwm_duty = pwm_val;
-    Motor_WriteOutput(output, pwm_val);
+    Motor_WriteOutput(output, hardware_pwm);
 }
 
 int32_t Motor_ReadSpeed(uint8_t motor_id) {
