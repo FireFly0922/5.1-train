@@ -23,18 +23,35 @@ static void Wheel_InitState(void);
 static void Wheel_InitRuntime(uint32_t now_tick);
 static void Wheel_UpdateMotorTest(uint32_t now_tick);
 static void Wheel_UpdatePID(uint32_t now_tick, float dt);
-static uint8_t Wheel_UpdateGwOpenLoop(float *left_pwm, float *right_pwm, float dt);
-static void Wheel_UpdateGwTargets(Wheel_t *left_wheel, Wheel_t *right_wheel, float dt);
+static uint8_t Wheel_UpdateRoute(float *left_pwm, float *right_pwm, float dt,
+                                 uint32_t now_tick, uint8_t *direct_pwm);
+static uint8_t Wheel_UpdateGwTargets(Wheel_t *left_wheel, Wheel_t *right_wheel, float dt,
+                                     uint32_t now_tick);
 static float Wheel_UpdateLegacyPid(PID_t *pid, float target, float current, float dt);
-static int32_t Wheel_AddPidFeedforward(float target, float pid_output);
+static float Wheel_AddStaticDrive(float target, float pid_output);
+static float Wheel_ApplyPwmSlew(float target_pwm, int32_t last_pwm);
 static float Wheel_Clamp(float value, float min_value, float max_value);
 static void Wheel_CopyGwStatus(GW_Status status);
 static void Wheel_PrintGwSamples(void);
 static int32_t Wheel_FloatToScaled(float value, float scale);
+static const char *Wheel_RouteName(int32_t route_id);
+static const char *Wheel_ActionName(int32_t action);
+static const char *Wheel_StageName(int32_t stage);
+static int32_t Wheel_RouteActionForCross(uint8_t cross_index);
+static int32_t Wheel_StageForAction(int32_t action);
+static uint8_t Wheel_IsRouteLocked(void);
+static uint8_t Wheel_IsReacquired(void);
+static uint8_t Wheel_RouteIsDone(void);
+static void Wheel_SetRouteStage(int32_t stage, uint32_t now_tick);
+static uint8_t Wheel_CountBits(uint8_t value);
 
 static GW_Sensor g_gw_sensor;
 static PID_t g_gw_line_pid;
 static uint32_t g_motor_arm_tick;
+static uint32_t g_gw_ramp_start_tick;
+static uint32_t g_route_stage_tick;
+static uint8_t g_route_cross_count;
+static uint8_t g_route_logged_wait;
 
 #if APP_WHEEL_TEST_ENABLE
 typedef struct {
@@ -109,6 +126,9 @@ void Wheel_Init(void) {
             (unsigned int)APP_MOTOR_RIGHT_OUTPUT,
             (unsigned int)APP_ENCODER_LEFT_TIMER,
             (unsigned int)APP_ENCODER_RIGHT_TIMER);
+#if APP_MOTOR_DRIVER_TB6612_2PWM
+    PRINTLN("motor driver: TB6612 2PWM wiring, tie PWMA/PWMB/STBY high");
+#endif
     PRINTLN("drive: mode=%u straight_speed_x100=%ld",
             (unsigned int)APP_DRIVE_MODE,
             (long)Wheel_FloatToScaled(APP_STRAIGHT_TEST_SPEED, 100.0f));
@@ -209,13 +229,38 @@ static void Wheel_InitGw(void) {
              APP_GW_LINE_KP,
              APP_GW_LINE_KI,
              APP_GW_LINE_KD);
-    PID_SetIntegralLimit(&g_gw_line_pid, APP_PID_INTEGRAL_LIMIT);
+    PID_SetIntegralLimit(&g_gw_line_pid, APP_GW_LINE_INTEGRAL_LIMIT);
 }
 
 static void Wheel_InitState(void) {
     STATUS.state.main_mode = 0;
     STATUS.state.sub_mode = 0;
     STATUS.state.car_run_state = 0;
+#if APP_ROUTE_FIXED_ENABLE
+    STATUS.sensor.vision_class_id = APP_ROUTE_FIXED_CLASS_ID;
+    STATUS.sensor.vision_prob = 100U;
+    STATUS.sensor.vision_valid = 1U;
+    STATUS.sensor.vision_target = (float)APP_ROUTE_FIXED_CLASS_ID;
+    STATUS.state.route_id = APP_ROUTE_FIXED_CLASS_ID;
+    STATUS.state.route_stage = ROUTE_STAGE_ROUTE_LOCKED;
+    if (APP_ROUTE_FIXED_CLASS_ID == ROUTE_ID_A) {
+        STATUS.state.route_first_action = ROUTE_ACTION_LEFT;
+        STATUS.state.route_second_action = ROUTE_ACTION_NONE;
+    } else if (APP_ROUTE_FIXED_CLASS_ID == ROUTE_ID_B) {
+        STATUS.state.route_first_action = ROUTE_ACTION_RIGHT;
+        STATUS.state.route_second_action = ROUTE_ACTION_NONE;
+    } else if (APP_ROUTE_FIXED_CLASS_ID == ROUTE_ID_C) {
+        STATUS.state.route_first_action = ROUTE_ACTION_STRAIGHT;
+        STATUS.state.route_second_action = ROUTE_ACTION_LEFT;
+    } else {
+        STATUS.state.route_first_action = ROUTE_ACTION_STRAIGHT;
+        STATUS.state.route_second_action = ROUTE_ACTION_RIGHT;
+    }
+    PRINTLN("route fixed: id=%u first=%s second=%s",
+            (unsigned int)APP_ROUTE_FIXED_CLASS_ID,
+            Wheel_ActionName(STATUS.state.route_first_action),
+            Wheel_ActionName(STATUS.state.route_second_action));
+#else
     STATUS.sensor.vision_class_id = 0xFFU;
     STATUS.sensor.vision_prob = 0U;
     STATUS.sensor.vision_valid = 0U;
@@ -223,6 +268,10 @@ static void Wheel_InitState(void) {
     STATUS.state.route_stage = ROUTE_STAGE_WAIT_VISION;
     STATUS.state.route_first_action = ROUTE_ACTION_NONE;
     STATUS.state.route_second_action = ROUTE_ACTION_NONE;
+#endif
+    g_route_stage_tick = HAL_GetTick();
+    g_route_cross_count = 0U;
+    g_route_logged_wait = 0U;
 }
 
 static void Wheel_InitRuntime(uint32_t now_tick) {
@@ -233,6 +282,7 @@ static void Wheel_InitRuntime(uint32_t now_tick) {
     STATUS.runtime.last_tick = now_tick;
     STATUS.runtime.last_log_tick = now_tick;
     g_motor_arm_tick = now_tick;
+    g_gw_ramp_start_tick = now_tick + APP_MOTOR_ARM_DELAY_MS;
 }
 
 static void Wheel_UpdateMotorTest(uint32_t now_tick) {
@@ -244,6 +294,8 @@ static void Wheel_UpdateMotorTest(uint32_t now_tick) {
     uint32_t step_elapsed;
     uint32_t index;
     const Wheel_TestStep *step;
+    int32_t left_cmd;
+    int32_t right_cmd;
     int32_t speed_left;
     int32_t speed_right;
 
@@ -270,8 +322,24 @@ static void Wheel_UpdateMotorTest(uint32_t now_tick) {
     }
 
     step = &g_wheel_test_steps[step_index];
-    Motor_SetSpeed(WHEEL_LEFT_ID, step->left_pwm);
-    Motor_SetSpeed(WHEEL_RIGHT_ID, step->right_pwm);
+    left_cmd = step->left_pwm;
+    right_cmd = step->right_pwm;
+    if (step_elapsed < APP_MOTOR_START_BOOST_MS) {
+        if (left_cmd > 0) {
+            left_cmd = APP_MOTOR_START_BOOST_PWM;
+        } else if (left_cmd < 0) {
+            left_cmd = -APP_MOTOR_START_BOOST_PWM;
+        }
+
+        if (right_cmd > 0) {
+            right_cmd = APP_MOTOR_START_BOOST_PWM;
+        } else if (right_cmd < 0) {
+            right_cmd = -APP_MOTOR_START_BOOST_PWM;
+        }
+    }
+
+    Motor_SetRawPwm(WHEEL_LEFT_ID, left_cmd);
+    Motor_SetRawPwm(WHEEL_RIGHT_ID, right_cmd);
 
     speed_left = Motor_ReadSpeed(WHEEL_LEFT_ID);
     speed_right = Motor_ReadSpeed(WHEEL_RIGHT_ID);
@@ -280,8 +348,8 @@ static void Wheel_UpdateMotorTest(uint32_t now_tick) {
         ((now_tick - g_wheel_test_last_log_tick) >= APP_LOG_PERIOD_MS)) {
         PRINTLN("wheel test: %s | cmd L=%ld R=%ld | pwm L=%ld R=%ld | enc L=%ld R=%ld",
                 step->name,
-                (long)step->left_pwm,
-                (long)step->right_pwm,
+                (long)left_cmd,
+                (long)right_cmd,
                 (long)STATUS.motor.wheel[WHEEL_LEFT_INDEX].pwm_duty,
                 (long)STATUS.motor.wheel[WHEEL_RIGHT_INDEX].pwm_duty,
                 (long)speed_left,
@@ -294,6 +362,188 @@ static void Wheel_UpdateMotorTest(uint32_t now_tick) {
 #endif
 }
 
+static uint8_t Wheel_UpdateRoute(float *left_pwm, float *right_pwm, float dt,
+                                 uint32_t now_tick, uint8_t *direct_pwm) {
+#if APP_ROUTE_ENABLE
+    Wheel_t *left_wheel = &STATUS.motor.wheel[WHEEL_LEFT_INDEX];
+    Wheel_t *right_wheel = &STATUS.motor.wheel[WHEEL_RIGHT_INDEX];
+    int32_t action;
+    GW_Status status;
+    uint8_t gw_ok;
+
+    *left_pwm = 0.0f;
+    *right_pwm = 0.0f;
+    *direct_pwm = 0U;
+
+    if (Wheel_IsRouteLocked() == 0u) {
+        status = GW_Update(&g_gw_sensor);
+        Wheel_CopyGwStatus(status);
+        *left_pwm = 0.0f;
+        *right_pwm = 0.0f;
+        *direct_pwm = 1U;
+        left_wheel->target_speed = 0.0f;
+        right_wheel->target_speed = 0.0f;
+        PID_Reset(&g_gw_line_pid);
+        if (STATUS.state.route_stage != ROUTE_STAGE_WAIT_ROUTE) {
+            Wheel_SetRouteStage(ROUTE_STAGE_WAIT_ROUTE, now_tick);
+        } else if (g_route_logged_wait == 0U) {
+            PRINTLN("route wait: need valid MaixCam ABCD frame");
+            g_route_logged_wait = 1U;
+        }
+        return 1u;
+    }
+
+    g_route_logged_wait = 0U;
+    if (STATUS.state.route_stage == ROUTE_STAGE_ROUTE_LOCKED) {
+        g_route_cross_count = 0U;
+        Wheel_SetRouteStage(ROUTE_STAGE_LINE_FOLLOW, now_tick);
+    }
+
+    switch (STATUS.state.route_stage) {
+        case ROUTE_STAGE_WAIT_ROUTE:
+            Wheel_SetRouteStage(ROUTE_STAGE_LINE_FOLLOW, now_tick);
+            break;
+
+        case ROUTE_STAGE_LINE_FOLLOW:
+            gw_ok = Wheel_UpdateGwTargets(left_wheel, right_wheel, dt, now_tick);
+            if (gw_ok == 0U) {
+                if ((STATUS.sensor.gw.lost != 0U) &&
+                    (g_route_cross_count >= 1U) &&
+                    (STATUS.state.route_second_action != ROUTE_ACTION_NONE) &&
+                    ((now_tick - g_route_stage_tick) >= APP_ROUTE_CROSS_EXIT_MS)) {
+                    g_route_cross_count = 2U;
+                    Wheel_SetRouteStage(Wheel_StageForAction(STATUS.state.route_second_action),
+                                        now_tick);
+                    return 1u;
+                }
+                return 0u;
+            }
+
+            if (STATUS.sensor.gw.cross != 0U) {
+                Wheel_SetRouteStage(ROUTE_STAGE_CROSS_DETECTED, now_tick);
+            }
+            break;
+
+        case ROUTE_STAGE_CROSS_DETECTED:
+            gw_ok = Wheel_UpdateGwTargets(left_wheel, right_wheel, dt, now_tick);
+            if (gw_ok == 0U) {
+                return 0u;
+            }
+
+            if ((now_tick - g_route_stage_tick) >= APP_ROUTE_CROSS_DEBOUNCE_MS) {
+                g_route_cross_count++;
+                action = Wheel_RouteActionForCross(g_route_cross_count);
+                Wheel_SetRouteStage(Wheel_StageForAction(action), now_tick);
+            }
+            break;
+
+        case ROUTE_STAGE_STRAIGHT_THROUGH:
+            *left_pwm = (float)APP_GW_OPEN_PWM;
+            *right_pwm = (float)APP_GW_OPEN_PWM;
+            *direct_pwm = 1U;
+            left_wheel->target_speed = *left_pwm;
+            right_wheel->target_speed = *right_pwm;
+            PID_Reset(&g_gw_line_pid);
+            if ((now_tick - g_route_stage_tick) >= APP_ROUTE_STRAIGHT_MS) {
+                Wheel_SetRouteStage(ROUTE_STAGE_REACQUIRE_LINE, now_tick);
+            }
+            break;
+
+        case ROUTE_STAGE_TURN_LEFT:
+            *left_pwm = -(float)APP_ROUTE_TURN_LEFT_PWM;
+            *right_pwm = (float)APP_ROUTE_TURN_LEFT_PWM;
+            *direct_pwm = 1U;
+            left_wheel->target_speed = *left_pwm;
+            right_wheel->target_speed = *right_pwm;
+            PID_Reset(&g_gw_line_pid);
+            status = GW_Update(&g_gw_sensor);
+            Wheel_CopyGwStatus(status);
+            if (((now_tick - g_route_stage_tick) >= APP_ROUTE_TURN_MIN_MS) &&
+                (Wheel_IsReacquired() != 0U)) {
+                if (Wheel_RouteIsDone() != 0U) {
+                    Wheel_SetRouteStage(ROUTE_STAGE_DONE, now_tick);
+                } else {
+                    Wheel_SetRouteStage(ROUTE_STAGE_REACQUIRE_LINE, now_tick);
+                }
+            } else if ((now_tick - g_route_stage_tick) >= APP_ROUTE_TURN_TIMEOUT_MS) {
+                if (Wheel_RouteIsDone() != 0U) {
+                    Wheel_SetRouteStage(ROUTE_STAGE_DONE, now_tick);
+                } else {
+                    Wheel_SetRouteStage(ROUTE_STAGE_REACQUIRE_LINE, now_tick);
+                }
+            }
+            break;
+
+        case ROUTE_STAGE_TURN_RIGHT:
+            *left_pwm = (float)APP_ROUTE_TURN_RIGHT_PWM;
+            *right_pwm = -(float)APP_ROUTE_TURN_RIGHT_PWM;
+            *direct_pwm = 1U;
+            left_wheel->target_speed = *left_pwm;
+            right_wheel->target_speed = *right_pwm;
+            PID_Reset(&g_gw_line_pid);
+            status = GW_Update(&g_gw_sensor);
+            Wheel_CopyGwStatus(status);
+            if (((now_tick - g_route_stage_tick) >= APP_ROUTE_TURN_MIN_MS) &&
+                (Wheel_IsReacquired() != 0U)) {
+                if (Wheel_RouteIsDone() != 0U) {
+                    Wheel_SetRouteStage(ROUTE_STAGE_DONE, now_tick);
+                } else {
+                    Wheel_SetRouteStage(ROUTE_STAGE_REACQUIRE_LINE, now_tick);
+                }
+            } else if ((now_tick - g_route_stage_tick) >= APP_ROUTE_TURN_TIMEOUT_MS) {
+                if (Wheel_RouteIsDone() != 0U) {
+                    Wheel_SetRouteStage(ROUTE_STAGE_DONE, now_tick);
+                } else {
+                    Wheel_SetRouteStage(ROUTE_STAGE_REACQUIRE_LINE, now_tick);
+                }
+            }
+            break;
+
+        case ROUTE_STAGE_REACQUIRE_LINE:
+            gw_ok = Wheel_UpdateGwTargets(left_wheel, right_wheel, dt, now_tick);
+            if (gw_ok == 0U) {
+                return 0u;
+            }
+
+            if (((now_tick - g_route_stage_tick) >= APP_ROUTE_CROSS_EXIT_MS) &&
+                (Wheel_IsReacquired() != 0U)) {
+                if (Wheel_RouteIsDone() != 0U) {
+                    Wheel_SetRouteStage(ROUTE_STAGE_DONE, now_tick);
+                } else {
+                    Wheel_SetRouteStage(ROUTE_STAGE_LINE_FOLLOW, now_tick);
+                }
+            }
+            break;
+
+        case ROUTE_STAGE_DONE:
+        case ROUTE_STAGE_INVALID:
+        default:
+            *left_pwm = 0.0f;
+            *right_pwm = 0.0f;
+            *direct_pwm = 1U;
+            left_wheel->target_speed = 0.0f;
+            right_wheel->target_speed = 0.0f;
+            PID_Reset(&g_gw_line_pid);
+            break;
+    }
+
+    if (*direct_pwm != 0U) {
+        *left_pwm = Wheel_Clamp(*left_pwm, (float)-APP_MAX_PWM, (float)APP_MAX_PWM);
+        *right_pwm = Wheel_Clamp(*right_pwm, (float)-APP_MAX_PWM, (float)APP_MAX_PWM);
+    }
+
+    return 1u;
+#else
+    Wheel_t *left_wheel = &STATUS.motor.wheel[WHEEL_LEFT_INDEX];
+    Wheel_t *right_wheel = &STATUS.motor.wheel[WHEEL_RIGHT_INDEX];
+
+    *direct_pwm = 0U;
+    *left_pwm = 0.0f;
+    *right_pwm = 0.0f;
+    return Wheel_UpdateGwTargets(left_wheel, right_wheel, dt, HAL_GetTick());
+#endif
+}
+
 // Drive both wheels with the same speed loop parameters used by legacy.
 static void Wheel_UpdatePID(uint32_t now_tick, float dt) {
     Wheel_t *left_wheel = &STATUS.motor.wheel[WHEEL_LEFT_INDEX];
@@ -303,6 +553,7 @@ static void Wheel_UpdatePID(uint32_t now_tick, float dt) {
     int32_t speed_left;
     int32_t speed_right;
     uint8_t motor_armed;
+    uint8_t direct_pwm;
 
     speed_left = Motor_ReadSpeed(WHEEL_LEFT_ID);
     speed_right = Motor_ReadSpeed(WHEEL_RIGHT_ID);
@@ -310,6 +561,7 @@ static void Wheel_UpdatePID(uint32_t now_tick, float dt) {
 
     left_pwm = 0.0f;
     right_pwm = 0.0f;
+    direct_pwm = 0U;
     motor_armed = ((now_tick - g_motor_arm_tick) >= APP_MOTOR_ARM_DELAY_MS) ? 1u : 0u;
 
     if (motor_armed == 0u) {
@@ -324,8 +576,6 @@ static void Wheel_UpdatePID(uint32_t now_tick, float dt) {
         right_wheel->target_speed = 0.0f;
         left_pwm = (float)APP_STRAIGHT_TEST_PWM;
         right_pwm = (float)APP_STRAIGHT_TEST_PWM;
-        left_pwm = (float)Wheel_AddPidFeedforward(1.0f, left_pwm);
-        right_pwm = (float)Wheel_AddPidFeedforward(1.0f, right_pwm);
         PID_Reset(&left_wheel->pid);
         PID_Reset(&right_wheel->pid);
         PID_Reset(&g_gw_line_pid);
@@ -340,18 +590,36 @@ static void Wheel_UpdatePID(uint32_t now_tick, float dt) {
                                           right_wheel->target_speed,
                                           (float)speed_right,
                                           dt);
-        left_pwm = (float)Wheel_AddPidFeedforward(left_wheel->target_speed, left_pwm);
-        right_pwm = (float)Wheel_AddPidFeedforward(right_wheel->target_speed, right_pwm);
+        left_pwm = Wheel_AddStaticDrive(left_wheel->target_speed, left_pwm);
+        right_pwm = Wheel_AddStaticDrive(right_wheel->target_speed, right_pwm);
 #else
-        if (Wheel_UpdateGwOpenLoop(&left_pwm, &right_pwm, dt) != 0u) {
-            PID_Reset(&left_wheel->pid);
-            PID_Reset(&right_wheel->pid);
+        if (Wheel_UpdateRoute(&left_pwm, &right_pwm, dt, now_tick, &direct_pwm) != 0u) {
+            if (direct_pwm == 0U) {
+                left_pwm = Wheel_UpdateLegacyPid(&left_wheel->pid,
+                                                 left_wheel->target_speed,
+                                                 (float)speed_left,
+                                                 dt);
+                right_pwm = Wheel_UpdateLegacyPid(&right_wheel->pid,
+                                                  right_wheel->target_speed,
+                                                  (float)speed_right,
+                                                  dt);
+                left_pwm = Wheel_AddStaticDrive(left_wheel->target_speed, left_pwm);
+                right_pwm = Wheel_AddStaticDrive(right_wheel->target_speed, right_pwm);
+            } else {
+                PID_Reset(&left_wheel->pid);
+                PID_Reset(&right_wheel->pid);
+            }
         } else {
             left_wheel->target_speed = 0.0f;
             right_wheel->target_speed = 0.0f;
+            PID_Reset(&left_wheel->pid);
+            PID_Reset(&right_wheel->pid);
         }
 #endif
     }
+
+    left_pwm = Wheel_ApplyPwmSlew(left_pwm, left_wheel->pwm_duty);
+    right_pwm = Wheel_ApplyPwmSlew(right_pwm, right_wheel->pwm_duty);
 
     Motor_SetRawPwm(WHEEL_LEFT_ID, (int32_t)left_pwm);
     Motor_SetRawPwm(WHEEL_RIGHT_ID, (int32_t)right_pwm);
@@ -361,10 +629,15 @@ static void Wheel_UpdatePID(uint32_t now_tick, float dt) {
     STATUS.runtime.control_out = (left_pwm + right_pwm) * 0.5f;
 
     if ((now_tick - STATUS.runtime.last_log_tick) >= APP_LOG_PERIOD_MS) {
-        PRINTLN("GW bits=0x%02X pos_x100=%ld corr_pwm=%ld lost=%u cross=%u st=%ld armed=%u | L target_pwm=%ld speed=%ld pwm=%ld | R target_pwm=%ld speed=%ld pwm=%ld dt_x1000=%ld",
+        PRINTLN("route=%s stage=%s cross_n=%u action=%s out=%s | GW bits=0x%02X pos_x100=%ld corr_x100=%ld lost=%u cross=%u st=%ld armed=%u | L target=%ld speed=%ld pwm=%ld | R target=%ld speed=%ld pwm=%ld dt_x1000=%ld",
+                Wheel_RouteName(STATUS.state.route_id),
+                Wheel_StageName(STATUS.state.route_stage),
+                (unsigned int)g_route_cross_count,
+                Wheel_ActionName(Wheel_RouteActionForCross(g_route_cross_count)),
+                (direct_pwm != 0U) ? "PWM" : "SPD",
                 STATUS.sensor.gw.line_bits,
                 (long)Wheel_FloatToScaled(STATUS.sensor.gw.line_position, 100.0f),
-                (long)((left_wheel->target_speed - right_wheel->target_speed) * 0.5f),
+                (long)Wheel_FloatToScaled((left_wheel->target_speed - right_wheel->target_speed) * 0.5f, 100.0f),
                 STATUS.sensor.gw.lost,
                 STATUS.sensor.gw.cross,
                 (long)STATUS.sensor.gw.last_status,
@@ -381,81 +654,13 @@ static void Wheel_UpdatePID(uint32_t now_tick, float dt) {
     }
 }
 
-static uint8_t Wheel_UpdateGwOpenLoop(float *left_pwm, float *right_pwm, float dt) {
-    GW_Status status;
-    uint8_t bits;
-    uint8_t left_trigger;
-    uint8_t right_trigger;
-    float position;
-    float base_pwm;
-    float turn_pwm;
-    float slow_pwm;
-
-    (void)dt;
-
-    status = GW_Update(&g_gw_sensor);
-    Wheel_CopyGwStatus(status);
-
-    if (status != GW_OK) {
-        *left_pwm = 0.0f;
-        *right_pwm = 0.0f;
-        PID_Reset(&g_gw_line_pid);
-        return 0u;
-    }
-
-    bits = GW_GetLineBits(&g_gw_sensor);
-    if (bits == 0x00u) {
-        *left_pwm = 0.0f;
-        *right_pwm = 0.0f;
-        PID_Reset(&g_gw_line_pid);
-        return 0u;
-    }
-
-    PID_Reset(&g_gw_line_pid);
-
-    base_pwm = Wheel_Clamp((float)APP_GW_OPEN_PWM, 0.0f, (float)APP_MAX_PWM);
-    turn_pwm = (float)APP_GW_OPEN_TURN_PWM;
-    if ((bits & 0x81u) != 0u) {
-        turn_pwm = (float)APP_GW_OPEN_SHARP_TURN_PWM;
-    }
-
-    slow_pwm = Wheel_Clamp(base_pwm - turn_pwm,
-                           (float)APP_GW_MIN_FORWARD_PWM,
-                           base_pwm);
-
-    *left_pwm = base_pwm;
-    *right_pwm = base_pwm;
-
-    if ((bits != 0xFFu) &&
-        (GW_IsCross(&g_gw_sensor) == 0u) &&
-        ((bits & 0x18u) == 0u)) {
-        left_trigger = (uint8_t)(bits & 0x07u);
-        right_trigger = (uint8_t)(bits & 0xE0u);
-        position = GW_GetPosition(&g_gw_sensor);
-
-        if ((left_trigger != 0u) && (right_trigger == 0u)) {
-            *left_pwm = slow_pwm;
-        } else if ((right_trigger != 0u) && (left_trigger == 0u)) {
-            *right_pwm = slow_pwm;
-        } else if (position < 0.0f) {
-            *left_pwm = slow_pwm;
-        } else if (position > 0.0f) {
-            *right_pwm = slow_pwm;
-        }
-    }
-
-    *left_pwm = Wheel_Clamp(*left_pwm, 0.0f, (float)APP_MAX_PWM);
-    *right_pwm = Wheel_Clamp(*right_pwm, 0.0f, (float)APP_MAX_PWM);
-
-    STATUS.motor.wheel[WHEEL_LEFT_INDEX].target_speed = *left_pwm;
-    STATUS.motor.wheel[WHEEL_RIGHT_INDEX].target_speed = *right_pwm;
-
-    return 1u;
-}
-
-static void Wheel_UpdateGwTargets(Wheel_t *left_wheel, Wheel_t *right_wheel, float dt) {
+static uint8_t Wheel_UpdateGwTargets(Wheel_t *left_wheel, Wheel_t *right_wheel, float dt,
+                                     uint32_t now_tick) {
     GW_Status status;
     float correction;
+    float base_speed;
+    float left_target;
+    float right_target;
 
     status = GW_Update(&g_gw_sensor);
     Wheel_CopyGwStatus(status);
@@ -464,14 +669,14 @@ static void Wheel_UpdateGwTargets(Wheel_t *left_wheel, Wheel_t *right_wheel, flo
         left_wheel->target_speed = 0.0f;
         right_wheel->target_speed = 0.0f;
         PID_Reset(&g_gw_line_pid);
-        return;
+        return 0u;
     }
 
     if (GW_IsLost(&g_gw_sensor) != 0u) {
         left_wheel->target_speed = 0.0f;
         right_wheel->target_speed = 0.0f;
         PID_Reset(&g_gw_line_pid);
-        return;
+        return 0u;
     }
 
 #if APP_GW_STOP_ON_CROSS
@@ -479,39 +684,55 @@ static void Wheel_UpdateGwTargets(Wheel_t *left_wheel, Wheel_t *right_wheel, flo
         left_wheel->target_speed = 0.0f;
         right_wheel->target_speed = 0.0f;
         PID_Reset(&g_gw_line_pid);
-        return;
+        return 0u;
     }
 #endif
 
+    (void)dt;
     correction = PID_Update(&g_gw_line_pid,
                             APP_GW_STEER_SIGN * GW_GetPosition(&g_gw_sensor),
-                            dt);
+                            APP_GW_LINE_T_MS);
     correction = Wheel_Clamp(correction,
                              -APP_GW_MAX_CORRECTION,
                              APP_GW_MAX_CORRECTION);
 
-    left_wheel->target_speed = APP_GW_BASE_SPEED + correction;
-    right_wheel->target_speed = APP_GW_BASE_SPEED - correction;
+    base_speed = APP_GW_BASE_SPEED;
+    if (APP_GW_SPEED_RAMP_MS > 0U) {
+        uint32_t run_ms = now_tick - g_gw_ramp_start_tick;
+
+        if (run_ms < APP_GW_SPEED_RAMP_MS) {
+            base_speed *= (float)run_ms / (float)APP_GW_SPEED_RAMP_MS;
+        }
+    }
+
+    left_target = base_speed + correction;
+    right_target = base_speed - correction;
+
+    left_wheel->target_speed = Wheel_Clamp(left_target, 0.0f, APP_BASE_SPEED_FAST);
+    right_wheel->target_speed = Wheel_Clamp(right_target, 0.0f, APP_BASE_SPEED_FAST);
+
+    return 1u;
 }
 
 static float Wheel_UpdateLegacyPid(PID_t *pid, float target, float current, float dt) {
     float output;
 
-    output = PID_Update(pid, target - current, dt);
+    (void)dt;
+    output = -PID_Update(pid, current - target, APP_WHEEL_PID_T_MS);
 
     return output;
 }
 
-static int32_t Wheel_AddPidFeedforward(float target, float pid_output) {
-    float output;
+static float Wheel_AddStaticDrive(float target, float pid_output) {
+    float output = pid_output;
 
     if (target > 0.0f) {
-        output = pid_output + (float)APP_PWM_FEEDFORWARD;
+        output += (float)APP_PWM_STATIC_DRIVE;
         if (output < 0.0f) {
             output = 0.0f;
         }
     } else if (target < 0.0f) {
-        output = pid_output - (float)APP_PWM_FEEDFORWARD;
+        output -= (float)APP_PWM_STATIC_DRIVE;
         if (output > 0.0f) {
             output = 0.0f;
         }
@@ -519,7 +740,14 @@ static int32_t Wheel_AddPidFeedforward(float target, float pid_output) {
         output = 0.0f;
     }
 
-    return (int32_t)Wheel_Clamp(output, (float)-APP_MAX_PWM, (float)APP_MAX_PWM);
+    return Wheel_Clamp(output, (float)-APP_MAX_PWM, (float)APP_MAX_PWM);
+}
+
+static float Wheel_ApplyPwmSlew(float target_pwm, int32_t last_pwm) {
+    float min_pwm = (float)last_pwm - (float)APP_PWM_SLEW_STEP;
+    float max_pwm = (float)last_pwm + (float)APP_PWM_SLEW_STEP;
+
+    return Wheel_Clamp(target_pwm, min_pwm, max_pwm);
 }
 
 static float Wheel_Clamp(float value, float min_value, float max_value) {
@@ -555,6 +783,157 @@ static void Wheel_CopyGwStatus(GW_Status status) {
     STATUS.sensor.gw.lost = GW_IsLost(&g_gw_sensor);
     STATUS.sensor.gw.cross = GW_IsCross(&g_gw_sensor);
     STATUS.sensor.gw.last_status = (int32_t)status;
+}
+
+static const char *Wheel_RouteName(int32_t route_id) {
+    switch (route_id) {
+        case ROUTE_ID_A:
+            return "A";
+        case ROUTE_ID_B:
+            return "B";
+        case ROUTE_ID_C:
+            return "C";
+        case ROUTE_ID_D:
+            return "D";
+        default:
+            return "?";
+    }
+}
+
+static const char *Wheel_ActionName(int32_t action) {
+    switch (action) {
+        case ROUTE_ACTION_LEFT:
+            return "LEFT";
+        case ROUTE_ACTION_RIGHT:
+            return "RIGHT";
+        case ROUTE_ACTION_STRAIGHT:
+            return "STRAIGHT";
+        default:
+            return "NONE";
+    }
+}
+
+static const char *Wheel_StageName(int32_t stage) {
+    switch (stage) {
+        case ROUTE_STAGE_WAIT_VISION:
+            return "WAIT_VISION";
+        case ROUTE_STAGE_ROUTE_LOCKED:
+            return "ROUTE_LOCKED";
+        case ROUTE_STAGE_WAIT_ROUTE:
+            return "WAIT_ROUTE";
+        case ROUTE_STAGE_LINE_FOLLOW:
+            return "LINE_FOLLOW";
+        case ROUTE_STAGE_CROSS_DETECTED:
+            return "CROSS_DETECTED";
+        case ROUTE_STAGE_TURN_LEFT:
+            return "TURN_LEFT";
+        case ROUTE_STAGE_TURN_RIGHT:
+            return "TURN_RIGHT";
+        case ROUTE_STAGE_STRAIGHT_THROUGH:
+            return "STRAIGHT_THROUGH";
+        case ROUTE_STAGE_REACQUIRE_LINE:
+            return "REACQUIRE_LINE";
+        case ROUTE_STAGE_DONE:
+            return "DONE";
+        case ROUTE_STAGE_INVALID:
+            return "INVALID";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static int32_t Wheel_RouteActionForCross(uint8_t cross_index) {
+    if (cross_index == 0U) {
+        return STATUS.state.route_first_action;
+    }
+
+    if (cross_index == 1U) {
+        return STATUS.state.route_first_action;
+    }
+
+    if (cross_index == 2U) {
+        return STATUS.state.route_second_action;
+    }
+
+    return ROUTE_ACTION_NONE;
+}
+
+static int32_t Wheel_StageForAction(int32_t action) {
+    switch (action) {
+        case ROUTE_ACTION_LEFT:
+            return ROUTE_STAGE_TURN_LEFT;
+        case ROUTE_ACTION_RIGHT:
+            return ROUTE_STAGE_TURN_RIGHT;
+        case ROUTE_ACTION_STRAIGHT:
+            return ROUTE_STAGE_STRAIGHT_THROUGH;
+        default:
+            return ROUTE_STAGE_DONE;
+    }
+}
+
+static uint8_t Wheel_IsRouteLocked(void) {
+    return ((STATUS.sensor.vision_valid == 1U) &&
+            (STATUS.state.route_id >= ROUTE_ID_A) &&
+            (STATUS.state.route_id <= ROUTE_ID_D)) ? 1U : 0U;
+}
+
+static uint8_t Wheel_IsReacquired(void) {
+    uint8_t bits = STATUS.sensor.gw.line_bits;
+
+    if (STATUS.sensor.gw.lost != 0U) {
+        return 0U;
+    }
+
+    if (STATUS.sensor.gw.cross != 0U) {
+        return 0U;
+    }
+
+    if (bits == 0U) {
+        return 0U;
+    }
+
+    return (Wheel_CountBits(bits) >= APP_ROUTE_REACQUIRE_MIN_BITS) ? 1U : 0U;
+}
+
+static uint8_t Wheel_RouteIsDone(void) {
+    if (STATUS.state.route_second_action == ROUTE_ACTION_NONE) {
+        return (g_route_cross_count >= 1U) ? 1U : 0U;
+    }
+
+    return (g_route_cross_count >= 2U) ? 1U : 0U;
+}
+
+static void Wheel_SetRouteStage(int32_t stage, uint32_t now_tick) {
+    if (STATUS.state.route_stage == stage) {
+        return;
+    }
+
+    STATUS.state.route_stage = stage;
+    STATUS.state.car_run_state = stage;
+    g_route_stage_tick = now_tick;
+
+    PRINTLN("route stage=%s route=%s cross_n=%u first=%s second=%s bits=0x%02X cross=%u lost=%u",
+            Wheel_StageName(stage),
+            Wheel_RouteName(STATUS.state.route_id),
+            (unsigned int)g_route_cross_count,
+            Wheel_ActionName(STATUS.state.route_first_action),
+            Wheel_ActionName(STATUS.state.route_second_action),
+            STATUS.sensor.gw.line_bits,
+            STATUS.sensor.gw.cross,
+            STATUS.sensor.gw.lost);
+}
+
+static uint8_t Wheel_CountBits(uint8_t value) {
+    uint8_t count = 0U;
+
+    while (value != 0U) {
+        if ((value & 0x01U) != 0U) {
+            count++;
+        }
+        value >>= 1;
+    }
+
+    return count;
 }
 
 static void Wheel_PrintGwSamples(void) {

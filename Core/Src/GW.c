@@ -3,6 +3,10 @@
 #include <string.h>
 
 #define GW_POS_EPSILON 0.000001f
+#define GW_LINE_CORE_FIRST 2u
+#define GW_LINE_CORE_LAST  5u
+#define GW_DIGITAL_LOW_THRESHOLD 33u
+#define GW_DIGITAL_HIGH_THRESHOLD 66u
 
 /**
  * @brief 加载灰度传感器默认位置权重。
@@ -12,7 +16,7 @@ static void GW_LoadDefaultWeights(GW_Sensor *sensor)
 {
     static const int8_t default_weights[GW_CHANNELS] =
     {
-        -4, -3, -2, -1, 1, 2, 3, 4
+        -30, -20, -15, -10, 10, 15, 20, 30
     };
 
     memcpy(sensor->weights, default_weights, sizeof(default_weights));
@@ -146,13 +150,24 @@ static uint16_t GW_NormalizeOne(uint16_t raw, uint16_t black, uint16_t white)
 static void GW_UpdateLineBits(GW_Sensor *sensor)
 {
     uint8_t i;
-    uint8_t bits = 0u;
+    uint8_t bits = sensor->line_bits;
+    uint8_t low_threshold = sensor->low_threshold;
+    uint8_t high_threshold = GW_DIGITAL_HIGH_THRESHOLD;
+
+    if (low_threshold > GW_DIGITAL_LOW_THRESHOLD) {
+        high_threshold = (uint8_t)(low_threshold +
+                                   ((sensor->high_value - low_threshold) / 2u));
+    }
 
     for (i = 0u; i < GW_CHANNELS; i++)
     {
-        if (sensor->normalized[i] <= sensor->low_threshold)
+        if (sensor->normalized[i] <= low_threshold)
         {
             bits |= (uint8_t)(1u << i);
+        }
+        else if (sensor->normalized[i] >= high_threshold)
+        {
+            bits &= (uint8_t)~(uint8_t)(1u << i);
         }
     }
 
@@ -166,28 +181,37 @@ static void GW_UpdateLineBits(GW_Sensor *sensor)
 static void GW_UpdatePosition(GW_Sensor *sensor)
 {
     uint8_t i;
-    float weight;
+    float strength[GW_CHANNELS] = {0.0f};
+    float total_strength = 0.0f;
     float sum_weight = 0.0f;
-    float sum_position = 0.0f;
+    uint8_t high_threshold = GW_DIGITAL_HIGH_THRESHOLD;
 
-    for (i = 0u; i < GW_CHANNELS; i++)
-    {
-        if (sensor->normalized[i] >= sensor->high_value)
-        {
-            weight = 0.0f;
-        }
-        else
-        {
-            weight = (float)(sensor->high_value - sensor->normalized[i]);
-        }
-
-        sum_weight += weight;
-        sum_position += weight * (float)sensor->weights[i];
+    if (sensor->low_threshold > GW_DIGITAL_LOW_THRESHOLD) {
+        high_threshold = (uint8_t)(sensor->low_threshold +
+                                   ((sensor->high_value - sensor->low_threshold) / 2u));
     }
 
-    if (sum_weight > GW_POS_EPSILON)
+    for (i = GW_LINE_CORE_FIRST; i <= GW_LINE_CORE_LAST; i++)
     {
-        sensor->line_position = sum_position / sum_weight;
+        if (sensor->normalized[i] < high_threshold)
+        {
+            strength[i] = (float)(sensor->high_value - sensor->normalized[i]);
+            total_strength += strength[i];
+        }
+    }
+
+    if (total_strength > GW_POS_EPSILON)
+    {
+        for (i = GW_LINE_CORE_FIRST; i <= GW_LINE_CORE_LAST; i++)
+        {
+            sum_weight += (strength[i] / total_strength) * (float)sensor->weights[i];
+        }
+
+        sensor->line_position = sum_weight;
+    }
+    else
+    {
+        sensor->line_position = 0.0f;
     }
 }
 
@@ -208,6 +232,16 @@ static void GW_UpdateState(GW_Sensor *sensor)
         sensor->cross = 1u;
     }
     else if ((sensor->line_bits & 0x81u) == 0x81u)
+    {
+        sensor->cross = 1u;
+    }
+    else if (((sensor->line_bits & 0x03u) != 0u) &&
+             ((sensor->line_bits & 0x3Cu) != 0u))
+    {
+        sensor->cross = 1u;
+    }
+    else if (((sensor->line_bits & 0xC0u) != 0u) &&
+             ((sensor->line_bits & 0x3Cu) != 0u))
     {
         sensor->cross = 1u;
     }

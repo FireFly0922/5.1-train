@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "maixcam_uart.h"
 #include "wheel.h"
+#include "app_config.h"
 
 /* USER CODE END Includes */
 
@@ -105,8 +106,10 @@ int main(void)
   MX_ADC2_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  MaixCamUart_Init();
   Wheel_Init();
+#if APP_MAIXCAM_ENABLE
+  MaixCamUart_Init();
+#endif
 
   /* USER CODE END 2 */
 
@@ -117,7 +120,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if APP_MAIXCAM_ENABLE
     MaixCamUart_Process();
+#endif
     Wheel_Update();
   }
   /* USER CODE END 3 */

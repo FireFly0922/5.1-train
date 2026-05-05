@@ -109,16 +109,20 @@ static const char *MaixCamUart_StageName(int32_t stage)
       return "WAIT_VISION";
     case ROUTE_STAGE_ROUTE_LOCKED:
       return "ROUTE_LOCKED";
-    case ROUTE_STAGE_FIRST_CROSS_LEFT:
-      return "FIRST_CROSS_LEFT";
-    case ROUTE_STAGE_FIRST_CROSS_RIGHT:
-      return "FIRST_CROSS_RIGHT";
-    case ROUTE_STAGE_FIRST_CROSS_STRAIGHT:
-      return "FIRST_CROSS_STRAIGHT";
-    case ROUTE_STAGE_SECOND_T_LEFT:
-      return "SECOND_T_LEFT";
-    case ROUTE_STAGE_SECOND_T_RIGHT:
-      return "SECOND_T_RIGHT";
+    case ROUTE_STAGE_WAIT_ROUTE:
+      return "WAIT_ROUTE";
+    case ROUTE_STAGE_LINE_FOLLOW:
+      return "LINE_FOLLOW";
+    case ROUTE_STAGE_CROSS_DETECTED:
+      return "CROSS_DETECTED";
+    case ROUTE_STAGE_TURN_LEFT:
+      return "TURN_LEFT";
+    case ROUTE_STAGE_TURN_RIGHT:
+      return "TURN_RIGHT";
+    case ROUTE_STAGE_STRAIGHT_THROUGH:
+      return "STRAIGHT_THROUGH";
+    case ROUTE_STAGE_REACQUIRE_LINE:
+      return "REACQUIRE_LINE";
     case ROUTE_STAGE_DONE:
       return "DONE";
     case ROUTE_STAGE_INVALID:
@@ -131,6 +135,17 @@ static const char *MaixCamUart_StageName(int32_t stage)
 static void MaixCamUart_SetInvalidRoute(uint8_t class_id, uint8_t prob,
                                         uint8_t valid)
 {
+  if ((STATUS.sensor.vision_valid == 1U) &&
+      (STATUS.state.route_id >= ROUTE_ID_A) &&
+      (STATUS.state.route_id <= ROUTE_ID_D)) {
+    PRINTLN("MaixCam route invalid ignored id=%u prob=%u valid=%u locked=%s",
+            (unsigned int)class_id,
+            (unsigned int)prob,
+            (unsigned int)valid,
+            MaixCamUart_RouteName((uint8_t)STATUS.state.route_id));
+    return;
+  }
+
   STATUS.sensor.vision_class_id = class_id;
   STATUS.sensor.vision_prob = prob;
   STATUS.sensor.vision_valid = valid;
@@ -146,7 +161,17 @@ static void MaixCamUart_SetRoute(uint8_t class_id, uint8_t prob,
 {
   int32_t first_action = ROUTE_ACTION_NONE;
   int32_t second_action = ROUTE_ACTION_NONE;
-  int32_t stage = ROUTE_STAGE_INVALID;
+
+  if ((STATUS.sensor.vision_valid == 1U) &&
+      (STATUS.state.route_id >= ROUTE_ID_A) &&
+      (STATUS.state.route_id <= ROUTE_ID_D)) {
+    PRINTLN("MaixCam route locked keep=%s new=%s id=%u prob=%u",
+            MaixCamUart_RouteName((uint8_t)STATUS.state.route_id),
+            MaixCamUart_RouteName(class_id),
+            (unsigned int)class_id,
+            (unsigned int)prob);
+    return;
+  }
 
   STATUS.sensor.vision_class_id = class_id;
   STATUS.sensor.vision_prob = prob;
@@ -157,29 +182,25 @@ static void MaixCamUart_SetRoute(uint8_t class_id, uint8_t prob,
   switch (class_id) {
     case 0U:
       first_action = ROUTE_ACTION_LEFT;
-      stage = ROUTE_STAGE_FIRST_CROSS_LEFT;
       break;
     case 1U:
       first_action = ROUTE_ACTION_RIGHT;
-      stage = ROUTE_STAGE_FIRST_CROSS_RIGHT;
       break;
     case 2U:
       first_action = ROUTE_ACTION_STRAIGHT;
       second_action = ROUTE_ACTION_LEFT;
-      stage = ROUTE_STAGE_FIRST_CROSS_STRAIGHT;
       break;
     case 3U:
       first_action = ROUTE_ACTION_STRAIGHT;
       second_action = ROUTE_ACTION_RIGHT;
-      stage = ROUTE_STAGE_FIRST_CROSS_STRAIGHT;
       break;
     default:
       MaixCamUart_SetInvalidRoute(class_id, prob, valid);
       return;
   }
 
-  STATUS.state.route_stage = stage;
-  STATUS.state.car_run_state = stage;
+  STATUS.state.route_stage = ROUTE_STAGE_ROUTE_LOCKED;
+  STATUS.state.car_run_state = ROUTE_STAGE_ROUTE_LOCKED;
   STATUS.state.route_first_action = first_action;
   STATUS.state.route_second_action = second_action;
 
@@ -188,7 +209,7 @@ static void MaixCamUart_SetRoute(uint8_t class_id, uint8_t prob,
           (unsigned int)class_id,
           (unsigned int)prob,
           (unsigned int)valid,
-          MaixCamUart_StageName(stage));
+          MaixCamUart_StageName(ROUTE_STAGE_ROUTE_LOCKED));
 
   if (second_action == ROUTE_ACTION_LEFT) {
     PRINTLN("MaixCam route=%s next=SECOND_T_LEFT",
