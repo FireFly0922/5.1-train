@@ -1,6 +1,34 @@
 #ifndef STATUS_H
 #define STATUS_H
 
+/* Route state used by MaixCam ABCD parsing. */
+typedef enum {
+    ROUTE_ID_NONE = -1,
+    ROUTE_ID_A = 0,
+    ROUTE_ID_B = 1,
+    ROUTE_ID_C = 2,
+    ROUTE_ID_D = 3,
+} RouteId_t;
+
+typedef enum {
+    ROUTE_ACTION_NONE = 0,
+    ROUTE_ACTION_LEFT,
+    ROUTE_ACTION_RIGHT,
+    ROUTE_ACTION_STRAIGHT,
+} RouteAction_t;
+
+typedef enum {
+    ROUTE_STAGE_WAIT_VISION = 0,
+    ROUTE_STAGE_ROUTE_LOCKED,
+    ROUTE_STAGE_FIRST_CROSS_LEFT,
+    ROUTE_STAGE_FIRST_CROSS_RIGHT,
+    ROUTE_STAGE_FIRST_CROSS_STRAIGHT,
+    ROUTE_STAGE_SECOND_T_LEFT,
+    ROUTE_STAGE_SECOND_T_RIGHT,
+    ROUTE_STAGE_DONE,
+    ROUTE_STAGE_INVALID,
+} RouteStage_t;
+
 #include <stdint.h>
 
 #include "main.h"
@@ -58,6 +86,9 @@ typedef struct {
     Gyro_t gyro;             /* 陀螺仪/姿态状态。 */
     Gw_t gw;                 /* 灰度传感器状态。 */
     float vision_target;     /* 视觉目标位置或偏差。 */
+    uint8_t vision_class_id;
+    uint8_t vision_prob;
+    uint8_t vision_valid;
 } Sensor_t;
 
 typedef struct {
@@ -68,6 +99,10 @@ typedef struct {
     int32_t main_mode;       /* 主模式编号。 */
     int32_t sub_mode;        /* 子模式编号。 */
     int32_t car_run_state;   /* 小车运行状态编号。 */
+    int32_t route_id;
+    int32_t route_stage;
+    int32_t route_first_action;
+    int32_t route_second_action;
 } State_t;
 
 typedef struct {

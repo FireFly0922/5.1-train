@@ -25,6 +25,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "maixcam_uart.h"
 #include "wheel.h"
 
 /* USER CODE END Includes */
@@ -104,6 +105,7 @@ int main(void)
   MX_ADC2_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  MaixCamUart_Init();
   Wheel_Init();
 
   /* USER CODE END 2 */
@@ -115,6 +117,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    MaixCamUart_Process();
     Wheel_Update();
   }
   /* USER CODE END 3 */
@@ -175,6 +178,15 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  MaixCamUart_OnRxCplt(huart);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  MaixCamUart_OnError(huart);
+}
 
 /* USER CODE END 4 */
 

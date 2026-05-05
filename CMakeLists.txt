@@ -51,6 +51,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/GW.c
     Core/Src/status.c
     Core/Src/log.c
+    Core/Src/maixcam_uart.c
 )
 
 # Add include paths

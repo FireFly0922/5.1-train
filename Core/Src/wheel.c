@@ -216,6 +216,13 @@ static void Wheel_InitState(void) {
     STATUS.state.main_mode = 0;
     STATUS.state.sub_mode = 0;
     STATUS.state.car_run_state = 0;
+    STATUS.sensor.vision_class_id = 0xFFU;
+    STATUS.sensor.vision_prob = 0U;
+    STATUS.sensor.vision_valid = 0U;
+    STATUS.state.route_id = ROUTE_ID_NONE;
+    STATUS.state.route_stage = ROUTE_STAGE_WAIT_VISION;
+    STATUS.state.route_first_action = ROUTE_ACTION_NONE;
+    STATUS.state.route_second_action = ROUTE_ACTION_NONE;
 }
 
 static void Wheel_InitRuntime(uint32_t now_tick) {
